@@ -1,0 +1,8 @@
+[project]
+name = "participant-recruiter"
+version = "0.1.0"
+description = "Approval-first participant recruiting agent"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

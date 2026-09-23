@@ -9,6 +9,8 @@ class SearchLead:
     name: str
     profile_url: str
     source_url: str
+    company: str = ""
+    evidence: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,19 @@ class CandidateSearchPort(Protocol):
 
 class ProfessionalEmailEnrichmentPort(Protocol):
     def find(self, *, name: str, company: str, profile_url: str) -> EnrichmentMatch: ...
+
+
+class EmailVerificationPort(Protocol):
+    def verify(self, email: str) -> EnrichmentMatch: ...
+
+
+@dataclass(frozen=True)
+class EmailSendResult:
+    provider_message_id: str
+
+
+class EmailSendPort(Protocol):
+    def send(self, *, recipient: str, subject: str, body: str, idempotency_key: str) -> EmailSendResult: ...
 
 
 class Clock(Protocol):
@@ -49,3 +64,22 @@ class FakeProfessionalEmailEnrichment:
     def find(self, *, name: str, company: str, profile_url: str) -> EnrichmentMatch:
         self.requests.append({"name": name, "company": company, "profile_url": profile_url})
         return self.result
+
+
+class FakeEmailVerification:
+    def __init__(self, result: EnrichmentMatch | None = None) -> None:
+        self.result = result or EnrichmentMatch(None, "fake:unavailable", None, False)
+        self.emails: list[str] = []
+
+    def verify(self, email: str) -> EnrichmentMatch:
+        self.emails.append(email)
+        return self.result
+
+
+class FakeEmailSender:
+    def __init__(self) -> None:
+        self.requests: list[dict[str, str]] = []
+
+    def send(self, *, recipient: str, subject: str, body: str, idempotency_key: str) -> EmailSendResult:
+        self.requests.append({"recipient": recipient, "subject": subject, "body": body, "idempotency_key": idempotency_key})
+        return EmailSendResult(f"sandbox:{len(self.requests)}")

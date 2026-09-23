@@ -7,7 +7,12 @@ ALLOWED_TRANSITIONS: dict[CandidateStatus, frozenset[CandidateStatus]] = {
     CandidateStatus.DISCOVERED: frozenset({CandidateStatus.VERIFIED, CandidateStatus.REVIEW_REQUIRED}),
     CandidateStatus.VERIFIED: frozenset({CandidateStatus.QUALIFIED, CandidateStatus.NOT_QUALIFIED, CandidateStatus.REVIEW_REQUIRED}),
     CandidateStatus.REVIEW_REQUIRED: frozenset({CandidateStatus.QUALIFIED, CandidateStatus.NOT_QUALIFIED}),
-    CandidateStatus.QUALIFIED: frozenset(),
+    CandidateStatus.QUALIFIED: frozenset({CandidateStatus.CONTACTABLE}),
+    CandidateStatus.CONTACTABLE: frozenset({CandidateStatus.PROPOSED_FOR_REVIEW}),
+    CandidateStatus.PROPOSED_FOR_REVIEW: frozenset({CandidateStatus.APPROVED_FOR_OUTREACH}),
+    CandidateStatus.APPROVED_FOR_OUTREACH: frozenset({CandidateStatus.CONTACTED}),
+    CandidateStatus.CONTACTED: frozenset({CandidateStatus.BOUNCED}),
+    CandidateStatus.BOUNCED: frozenset(),
     CandidateStatus.NOT_QUALIFIED: frozenset(),
 }
 

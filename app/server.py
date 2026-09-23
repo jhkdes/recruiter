@@ -10,14 +10,21 @@ from urllib.parse import parse_qs
 from wsgiref.simple_server import make_server
 
 from app.domain.models import ParticipantCriteria
+from app.discovery import rank_candidate
 from app.persistence.sqlite_repository import SqliteRecruiterRepository
-from app.services import CampaignService, NotFoundError, evidence_from_payload
+from app.ports import FakeEmailSender
+from app.services import CampaignService, NotFoundError, OutreachService, evidence_from_payload
 
 
 database_path = Path(os.environ.get("RECRUITER_DB_PATH", ".data/recruiter.db"))
 database_path.parent.mkdir(parents=True, exist_ok=True)
 repository = SqliteRecruiterRepository(database_path)
 service = CampaignService(repository)
+outreach_service = OutreachService(
+    repository, FakeEmailSender(),
+    identity_url=os.environ.get("DISCOVER_FIRST_IDENTITY_URL", "https://discoverfirst.co"),
+    scheduling_url=os.environ.get("CALENDLY_SCHEDULING_URL", "https://calendly.com/discover-first"),
+)
 
 
 def _json(start_response: Callable, status: str, value: object) -> list[bytes]:
@@ -53,6 +60,13 @@ def _candidate_json(candidate: object) -> dict:
         "name": candidate.name,
         "status": str(candidate.status),
         "reviewer_note": candidate.reviewer_note,
+        "contact": None if candidate.contact is None else {
+            "email": candidate.contact.email,
+            "email_source": str(candidate.contact.email_source) if candidate.contact.email_source else None,
+            "confidence": candidate.contact.confidence,
+            "verification_status": str(candidate.contact.verification_status),
+            "provider_reference": candidate.contact.provider_reference,
+        },
         "evidence": [
             {
                 "criterion": item.criterion,
@@ -68,9 +82,10 @@ def _candidate_json(candidate: object) -> dict:
 def _page() -> str:
     rows: list[str] = []
     for campaign in repository.list_campaigns():
-        candidates = repository.list_candidates(campaign.id)
+        candidates = sorted(repository.list_candidates(campaign.id), key=lambda candidate: (-rank_candidate(candidate).score, candidate.name))
         candidate_rows = "".join(_candidate_row(candidate) for candidate in candidates) or "<li>No candidates yet.</li>"
-        rows.append(f"<section><h2>{html.escape(campaign.name)}</h2><p>{html.escape(campaign.research_goal)}</p><p>Target: {campaign.target_completions} calls by {campaign.deadline.date()}</p><ul>{candidate_rows}</ul></section>")
+        drafts = "".join(_draft_row(draft) for draft in repository.list_drafts(campaign.id)) or "<li>No pending email proposals.</li>"
+        rows.append(f"<section><h2>{html.escape(campaign.name)}</h2><p>{html.escape(campaign.research_goal)}</p><p>Target: {campaign.target_completions} calls by {campaign.deadline.date()}</p><h3>Candidates</h3><ul>{candidate_rows}</ul><h3>Email proposals</h3><ul>{drafts}</ul></section>")
     content = "".join(rows) or "<p>No campaigns yet. Create one through the API.</p>"
     return f"""<!doctype html><html><head><title>Riley reviewer</title><style>body{{font-family:system-ui;max-width:900px;margin:2rem auto;padding:0 1rem}}section{{border:1px solid #ddd;padding:1rem;margin:1rem 0}}li{{margin:.8rem 0}}</style></head><body><h1>Riley reviewer</h1><p>Milestone 1 candidate evidence review.</p>{content}</body></html>"""
 
@@ -88,7 +103,36 @@ def _candidate_row(candidate: object) -> str:
             '<button name="include" value="true">Include</button> '
             '<button name="include" value="false">Exclude</button></form>'
         )
-    return f"<li><strong>{html.escape(candidate.name)}</strong> - {html.escape(str(candidate.status))}<br>{evidence_links}{review_form}</li>"
+    contact = ""
+    if candidate.contact:
+        email = html.escape(candidate.contact.email or "No professional email found")
+        source = html.escape(str(candidate.contact.email_source or ""))
+        verification = html.escape(str(candidate.contact.verification_status))
+        reference = html.escape(candidate.contact.provider_reference)
+        confidence = "" if candidate.contact.confidence is None else f"; confidence {candidate.contact.confidence:g}"
+        contact = f"<br>Email proposal: {email} ({source}; {verification}{confidence}; reference {reference})"
+    email_form = ""
+    if str(candidate.status) == "qualified" and candidate.contact and candidate.contact.email and str(candidate.contact.verification_status) == "verified":
+        email_form = f'<form method="post" action="/ui/candidates/{html.escape(candidate.id, quote=True)}/email-proposal"><button>Prepare email for review</button></form>'
+    proposal = rank_candidate(candidate)
+    return f"<li><strong>{html.escape(candidate.name)}</strong> - {html.escape(str(candidate.status))} (priority {proposal.score})<br>{evidence_links}{contact}{email_form}{review_form}</li>"
+
+
+def _draft_row(draft: object) -> str:
+    approval = repository.get_approval_for_draft(draft.id)
+    state = str(approval.status) if approval else "missing approval"
+    controls = ""
+    if state == "pending":
+        controls = (
+            f'<form method="post" action="/ui/email-drafts/{html.escape(draft.id, quote=True)}/edit">'
+            f'<label>Subject <input name="subject" value="{html.escape(draft.subject, quote=True)}"></label><br>'
+            f'<label>Message<br><textarea name="body" rows="8" cols="80">{html.escape(draft.body)}</textarea></label><br>'
+            '<button>Save edits</button></form>'
+            f'<form method="post" action="/ui/email-drafts/{html.escape(draft.id, quote=True)}/approve"><button>Approve this exact email</button></form>'
+        )
+    elif state == "approved":
+        controls = f'<form method="post" action="/ui/email-drafts/{html.escape(draft.id, quote=True)}/send"><button>Send through sandbox</button></form>'
+    return f"<li><strong>{html.escape(draft.recipient)}</strong> — {html.escape(draft.subject)} ({html.escape(state)})<pre>{html.escape(draft.body)}</pre>{controls}</li>"
 
 
 def application(environ: dict, start_response: Callable) -> list[bytes]:
@@ -126,6 +170,26 @@ def application(environ: dict, start_response: Callable) -> list[bytes]:
             data = _read_json(environ)
             candidate = service.decide_uncertain_candidate(candidate_id=candidate_id, include=bool(data.get("include")), note=data.get("note", ""))
             return _json(start_response, "200 OK", _candidate_json(candidate))
+        if method == "POST" and path.startswith("/api/candidates/") and path.endswith("/email-proposal"):
+            draft, approval = outreach_service.propose_initial_email(path.split("/")[3])
+            return _json(start_response, "201 Created", {"draft_id": draft.id, "approval_id": approval.id, "recipient": draft.recipient, "subject": draft.subject, "body": draft.body})
+        if method == "POST" and path.startswith("/api/email-drafts/") and path.endswith("/approve"):
+            data = _read_json(environ)
+            approval = outreach_service.approve(path.split("/")[3], data.get("reviewer", "reviewer"))
+            return _json(start_response, "200 OK", {"draft_id": approval.draft_id, "status": str(approval.status)})
+        if method == "POST" and path.startswith("/api/email-drafts/") and path.endswith("/edit"):
+            data = _read_json(environ)
+            draft = outreach_service.revise_draft(path.split("/")[3], subject=data.get("subject", ""), body=data.get("body", ""))
+            return _json(start_response, "200 OK", {"draft_id": draft.id, "subject": draft.subject, "body": draft.body})
+        if method == "POST" and path.startswith("/api/email-drafts/") and path.endswith("/send"):
+            interaction = outreach_service.send_approved(path.split("/")[3])
+            return _json(start_response, "200 OK", {"provider_message_id": interaction.provider_message_id, "event_type": interaction.event_type})
+        if method == "POST" and path == "/api/email-webhooks":
+            data = _read_json(environ)
+            accepted = outreach_service.process_delivery_webhook(
+                event_id=data["event_id"], provider_message_id=data["provider_message_id"], event_type=data["event_type"],
+            )
+            return _json(start_response, "200 OK", {"accepted": accepted})
         if method == "POST" and path.startswith("/ui/candidates/") and path.endswith("/review"):
             candidate_id = path.split("/")[3]
             length = int(environ.get("CONTENT_LENGTH") or 0)
@@ -135,6 +199,24 @@ def application(environ: dict, start_response: Callable) -> list[bytes]:
                 include=form.get("include", [""])[0] == "true",
                 note=form.get("note", [""])[0],
             )
+            start_response("303 See Other", [("Location", "/")])
+            return [b""]
+        if method == "POST" and path.startswith("/ui/candidates/") and path.endswith("/email-proposal"):
+            outreach_service.propose_initial_email(path.split("/")[3])
+            start_response("303 See Other", [("Location", "/")])
+            return [b""]
+        if method == "POST" and path.startswith("/ui/email-drafts/") and path.endswith("/approve"):
+            outreach_service.approve(path.split("/")[3], "reviewer")
+            start_response("303 See Other", [("Location", "/")])
+            return [b""]
+        if method == "POST" and path.startswith("/ui/email-drafts/") and path.endswith("/edit"):
+            length = int(environ.get("CONTENT_LENGTH") or 0)
+            form = parse_qs(environ["wsgi.input"].read(length).decode("utf-8"))
+            outreach_service.revise_draft(path.split("/")[3], subject=form.get("subject", [""])[0], body=form.get("body", [""])[0])
+            start_response("303 See Other", [("Location", "/")])
+            return [b""]
+        if method == "POST" and path.startswith("/ui/email-drafts/") and path.endswith("/send"):
+            outreach_service.send_approved(path.split("/")[3])
             start_response("303 See Other", [("Location", "/")])
             return [b""]
         return _json(start_response, "404 Not Found", {"error": "route not found"})

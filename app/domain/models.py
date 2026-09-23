@@ -16,6 +16,11 @@ class CandidateStatus(StrEnum):
     QUALIFIED = "qualified"
     NOT_QUALIFIED = "not_qualified"
     REVIEW_REQUIRED = "review_required"
+    CONTACTABLE = "contactable"
+    PROPOSED_FOR_REVIEW = "proposed_for_review"
+    APPROVED_FOR_OUTREACH = "approved_for_outreach"
+    CONTACTED = "contacted"
+    BOUNCED = "bounced"
 
 
 class EvidenceSourceType(StrEnum):
@@ -24,6 +29,18 @@ class EvidenceSourceType(StrEnum):
     WEBINAR = "webinar"
     UPLOADED_LIST = "uploaded_list"
     OTHER_APPROVED_SOURCE = "other_approved_source"
+
+
+class EmailSourceType(StrEnum):
+    HUNTER = "hunter"
+    APOLLO = "apollo"
+    UPLOADED_LIST = "uploaded_list"
+
+
+class EmailVerificationStatus(StrEnum):
+    VERIFIED = "verified"
+    UNVERIFIED = "unverified"
+    UNAVAILABLE = "unavailable"
 
 
 REQUIRED_CRITERIA = ("title", "industry", "seniority", "region")
@@ -65,6 +82,61 @@ class CandidateEvidence:
     captured_at: datetime = field(default_factory=utc_now)
 
 
+@dataclass(frozen=True)
+class ContactResult:
+    email: str | None
+    email_source: EmailSourceType | None
+    confidence: float | None
+    verification_status: EmailVerificationStatus
+    provider_reference: str
+    checked_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(frozen=True)
+class CandidateProposal:
+    candidate_id: str
+    score: int
+    reasons: tuple[str, ...]
+    contactable: bool
+
+
+class ApprovalStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+@dataclass(frozen=True)
+class EmailDraft:
+    id: str
+    campaign_id: str
+    candidate_id: str
+    recipient: str
+    subject: str
+    body: str
+    idempotency_key: str
+    created_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass
+class EmailApproval:
+    id: str
+    draft_id: str
+    status: ApprovalStatus = ApprovalStatus.PENDING
+    approved_by: str | None = None
+    approved_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class EmailInteraction:
+    id: str
+    candidate_id: str
+    draft_id: str
+    provider_message_id: str
+    event_type: str
+    occurred_at: datetime = field(default_factory=utc_now)
+
+
 @dataclass
 class Candidate:
     id: str
@@ -73,6 +145,7 @@ class Candidate:
     evidence: list[CandidateEvidence] = field(default_factory=list)
     status: CandidateStatus = CandidateStatus.DISCOVERED
     reviewer_note: str | None = None
+    contact: ContactResult | None = None
     created_at: datetime = field(default_factory=utc_now)
 
 
